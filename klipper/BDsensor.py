@@ -726,18 +726,7 @@ class BDPrinterProbe:
         ppos, offsets = self.probe_calibrate_info
         configfile = self.printer.lookup_object('configfile')
         if self.mcu_probe.has_external_endstop:
-            # External endstop (e.g. Tap): calibrate homing_probe_z_offset.
-            # We want: after G28, Z=0 = paper/bed surface.
-            # At trigger the raw Z is ppos.test_z; at the paper test it is
-            # mpresult.bed_z.  The new offset is therefore:
-            #   new = trigger_z - paper_z  →  trigger_z - new = paper_z = 0 ✓
-            # get_position_endstop() = position_endstop + homing_probe_z_offset
-            # After trigger: ppos.test_z = raw toolhead Z at trigger
-            # We want new get_position_endstop() = ppos.test_z - mpresult[2]
-            # → new_H = ppos.test_z - mpresult[2] - position_endstop
-            # mpresult is a plain kin_pos list [x, y, z, e] from manual_probe
-            new_offset = (ppos.test_z - mpresult[2]
-                          - self.mcu_probe.position_endstop)
+            new_offset = offsets[2] - mpresult.bed_z + ppos.bed_z
             self.gcode.respond_info(
                 "%s: homing_probe_z_offset: %.3f\n"
                 "The SAVE_CONFIG command will update the printer config file\n"
@@ -790,10 +779,6 @@ class BDPrinterProbe:
         if offset == 0:
             self.gcode.respond_info("Nothing to do: Z Offset is 0")
         elif self.mcu_probe.has_external_endstop:
-            # External endstop (Tap): fine-tune goes into homing_probe_z_offset.
-            # Increasing homing_probe_z_offset raises get_position_endstop(),
-            # which makes G28 set a higher Z at trigger → Z=0 is lower → nozzle
-            # goes further down.  So: new_H = old_H - offset (same sign as BD).
             hp_z_offset = self.homing_probe_offsets.get_offsets(gcmd)[2]
             new_hp = hp_z_offset - offset
             self.gcode.respond_info(
@@ -1823,11 +1808,6 @@ class BDsensorEndstopWrapper:
             self.raise_probe()
 
     def get_position_endstop(self):
-        if self.has_external_endstop:
-            # External endstop (Tap): Klipper sets Z to this value when the
-            # endstop fires.  position_endstop is the coarse trigger height;
-            # homing_probe_z_offset is the PROBE_CALIBRATE / babystep fine-tune.
-            return self.position_endstop + self.homing_probe_z_offset
         return self.position_endstop
 
 
