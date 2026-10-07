@@ -1204,7 +1204,7 @@ class BDsensorEndstopWrapper:
 
         if not _verify_monotonic(cal_data):
             gcmd.respond_info("Calibration data is not monotonic")
-            gcmd.respond_info("Please check the sensor and try again.")
+            gcmd.respond_info("BDSensor converision PCB might be underpowered due to small section power cable or insufficient power supply leading to random read errors.")
             return False
         return True
 
