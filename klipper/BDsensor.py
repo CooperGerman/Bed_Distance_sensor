@@ -227,6 +227,8 @@ class BDPrinterProbe:
             except AttributeError as e:
                 gcmd.respond_info("%s" % str(e))
                 raise gcmd.error("%s" % str(e))
+        else:
+            gcmd.respond_info("Unknown probe command: %s" % gcmd.get_command())
         if self.multi_probe_pending:
             self._probe_state_error()
         self.mcu_probe.multi_probe_begin()
@@ -395,7 +397,7 @@ class BDPrinterProbe:
                 reason += HINT_TIMEOUT
             raise self.printer.command_error(reason)
         # Allow axis_twist_compensation to update results
-        epos = self.probe_offsets.create_probe_result(ppos)
+        epos = self.homing_probe_offsets.create_probe_result(ppos)
         poslist = [epos]
         self.printer.send_event("probe:update_results", poslist)
         epos = poslist[0]
@@ -1123,14 +1125,14 @@ class BDsensorEndstopWrapper:
         self.bd_value = intr / 100.00
         if fore_r == 0:
             if self.bd_value >= 10.24:
-                self.gcode.respond_info("Bed Distance Sensor "
+                self.gcode._respond_error("Bed Distance Sensor "
                                                  "data error0:%.2f"
                                                  % self.bd_value)
                 raise self.printer.command_error("Bed Distance Sensor "
                                                  "data error0:%.2f"
                                                  % self.bd_value)
             elif self.bd_value > 3.8:
-                self.gcode.respond_info("Bed Distance Sensor, "
+                self.gcode._respond_error("Bed Distance Sensor, "
                                                  "out of range.:%.2f "
                                                  % self.bd_value)
                 raise self.printer.command_error("Bed Distance Sensor, "
@@ -1138,7 +1140,7 @@ class BDsensorEndstopWrapper:
                                                  % self.bd_value)
         elif fore_r == 2:
             if self.bd_value >= 10.24:
-                self.gcode.respond_info("Bed Distance Sensor "
+                self.gcode._respond_error("Bed Distance Sensor "
                                                  "data error2:%.2f"
                                                  % self.bd_value)
                 raise self.printer.command_error("Bed Distance Sensor "
@@ -1184,6 +1186,43 @@ class BDsensorEndstopWrapper:
             self.gcode.respond_info("No data or corrupt data from BDsensor(%s), "
                                     "Please check connection"%self.bdversion)
 
+    def _analyze_calibration_data(self, gcmd, cal_data):
+        '''
+        Checks the calibration output data and ties to see if the first N
+        samples have equal values (small tolerance accepted). If this occurs
+        then it means there might be a tap endstop installed and the nozzle
+        was touching the plate for these N samples.
+        If more than 3 samples are concerned, emit a message to the user saying
+        homing_probe_z_offset might be wrong by Nxcal_z_step mm.
+        '''
+        def _verify_monotonic(data):
+            for i in range(1, len(data)):
+                if data[i] < data[i-1]:
+                    return False
+            return True
+
+        if not cal_data or len(cal_data) < 3:
+            gcmd.respond_info("Warning: Not enough calibration data")
+            return False
+        first_val = cal_data[0]
+        tolerance = 5
+        for i in range(1, len(cal_data)):
+            if abs(cal_data[i] - first_val) > tolerance:
+                break
+            else:
+                pass
+        if i > 1:
+            gcmd.respond_info("Calibration data appears inconsistent")
+            gcmd.respond_info(f"The first {i} calibration samples seem to be stuck at the same value.")
+            gcmd.respond_info(f"This might indicate an issue with the homing_probe_z_offset (if used).")
+            gcmd.respond_info(f"The offset might be {i*0.1} mm too low.")
+
+        if not _verify_monotonic(cal_data):
+            gcmd.respond_info("Calibration data is not monotonic")
+            gcmd.respond_info("Please check the sensor and try again.")
+            return False
+        return True
+
     def BD_calibrate(self, gcmd):
         if "V1." not in self.bdversion:
             self.BD_version(self.gcode,20)
@@ -1225,6 +1264,7 @@ class BDsensorEndstopWrapper:
         gcmd.respond_info("Please Wait... ")
         z_pos = 0
         ncount = 0
+        cal_data = []
         while 1:
             z_pos += 0.1
             self.I2C_BD_send((ncount))
@@ -1245,7 +1285,7 @@ class BDsensorEndstopWrapper:
                 self.I2C_BD_send(CMD_DISTANCE_MODE)
                 self.I2C_BD_send(CMD_DISTANCE_MODE)
                 self.toolhead.dwell(1)
-                self.BD_read_calibration(gcmd)
+                cal_data = self.BD_read_calibration(gcmd)
                 gcmd.respond_info("Calibrate Finished!")
                 #gcmd.respond_info("You can send command "
                 #                  "BDSENSOR_READ_CALIBRATION "
@@ -1257,6 +1297,7 @@ class BDsensorEndstopWrapper:
         self.I2C_BD_send(CMD_DISTANCE_MODE)
         self.I2C_BD_send(CMD_DISTANCE_MODE)
         self.collision_calibrating = 0
+        self._analyze_calibration_data(gcmd, cal_data)
         #self.toolhead.dwell(1)
         #self.BD_read_calibration(gcmd)
     def BD_read_calibration(self, gcmd):
@@ -1264,6 +1305,7 @@ class BDsensorEndstopWrapper:
         self.I2C_BD_send(CMD_START_READ_CALIBRATE_DATA)
         self.toolhead = self.printer.lookup_object('toolhead')
         ncount1 = 0
+        cal_vals = []
         while 1:
             intd = self.I2C_BD_send(CMD_READ_DATA, 1)
             gcmd.respond_info("%d at %.1fmm"%(intd,ncount1/10.0))
@@ -1276,12 +1318,15 @@ class BDsensorEndstopWrapper:
                 gcmd.respond_raw("BDSensor mounted too close! please mount"
                                  "the BDsensor 0.2~0.4mm higher")
             # break
+            cal_vals.append(intd)
             self.toolhead.dwell(0.03)
             ncount1 = ncount1 + 1
             if ncount1 >= 40:
                 break
         self.I2C_BD_send(CMD_DISTANCE_MODE)
         self.I2C_BD_send(CMD_DISTANCE_MODE)
+        # return the calibration data
+        return cal_vals
 
     def bd_distance(self, gcmd):
         self.bd_value = self.BD_Sensor_Read(1)
